@@ -71,7 +71,7 @@ export const registerAdminUserSchema = z.object({
         password: passwordField,
         full_name: fullNameField,
         phone: phoneField,
-        role: z.enum(['moderator', 'admin', 'super_admin']),
+        role: z.enum(['moderator', 'support', 'finance', 'admin', 'super_admin']),
         // ✅ NEW: Option to send welcome email with password
         send_welcome_email: z.boolean().optional().default(true),
     }),
@@ -146,7 +146,7 @@ export const updateAdminProfileSchema = z.object({
         full_name: fullNameField.optional(),
         email: emailField.optional(),
         phone: phoneField,
-        role: z.enum(['moderator', 'admin', 'super_admin']).optional(),
+        role: z.enum(['moderator', 'support', 'finance', 'admin', 'super_admin']).optional(),
         is_active: z.boolean().optional(),
     }),
 });
@@ -218,7 +218,7 @@ export const userListQuerySchema = z.object({
     query: z.object({
         page: z.coerce.number().min(1, 'Page must be at least 1').optional().default(1),
         limit: z.coerce.number().min(1, 'Limit must be at least 1').max(100, 'Limit must be at most 100').optional().default(20),
-        role: z.enum(['customer', 'seller', 'moderator', 'admin', 'super_admin']).optional(),
+        role: z.enum(['customer', 'seller', 'moderator', 'support', 'finance', 'admin', 'super_admin']).optional(),
         search: z.string().max(100, 'Search term is too long').trim().optional(),
         is_active: z.coerce.boolean().optional(),
         sortBy: z.enum(['created_at', 'full_name', 'email', 'role']).optional().default('created_at'),

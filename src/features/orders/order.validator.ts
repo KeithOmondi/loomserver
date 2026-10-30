@@ -100,12 +100,14 @@ export const checkoutSchema = z.object({
         .omit({ is_default: true })
         .optional(),
       customer_notes: z.string().max(1000).optional().nullable(),
+      coupon_code: z.string().max(50).optional().nullable(),
+      pickup_station_id: uuidSchema.optional().nullable(),
     })
     .refine(
-      (data) => Boolean(data.address_id) || Boolean(data.shipping_address),
+      (data) => Boolean(data.address_id) || Boolean(data.shipping_address) || Boolean(data.pickup_station_id),
       {
         message:
-          'Provide either address_id (saved address) or shipping_address (inline).',
+          'Provide address_id (saved address), shipping_address (inline) or pickup_station_id.',
         path: ['address_id'],
       },
     ),

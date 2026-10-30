@@ -12,10 +12,16 @@ import productRoutes from './features/products/product.routes';
 import sellerRoutes from "./features/seller/seller.routes"
 import moderatorRoutes from "./features/moderator/moderation.routes"
 import ordersRoutes from "./features/orders/order.routes"
+import orderActionsRoutes from './features/orders/order-actions.routes';
 import cartRoutes from "./features/cart/cart.routes"
 import wishlistRoutes from './features/wishlist/wishlist.routes';
 import paymentRoutes from './features/payments/payment.routes';
 import addressRoutes from './features/addresses/address.routes';
+import { disputesRouter, refundsRouter, returnsRouter, uploadsRouter } from './features/aftersales/aftersales.routes';
+import { accountRouter, catalogExtrasRouter, contentRouter, questionsRouter } from './features/platform/platform.public.routes';
+import { sellerHubRouter, variantsRouter } from './features/platform/platform.seller.routes';
+import adminRoutes from './features/platform/platform.admin.routes';
+import payoutsRoutes from './features/payouts/payouts.routes';
 import { errorMiddleware } from './middlewares/error.middleware';
 import { env } from './config/env';
 import { redisService } from './config/redis';
@@ -164,7 +170,10 @@ app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/users', userRoutes);
 app.use('/api/v1/stores', storeRoutes);
 app.use('/api/v1/categories', categoryRoutes);
+app.use('/api/v1/products', variantsRouter);
+app.use('/api/v1/products', catalogExtrasRouter);
 app.use('/api/v1/products', productRoutes);
+app.use('/api/v1/orders', orderActionsRoutes);
 app.use('/api/v1/orders', ordersRoutes);
 app.use('/api/v1/sellers', sellerRoutes);
 app.use('/api/v1/moderator', moderatorRoutes);
@@ -172,6 +181,16 @@ app.use('/api/v1/cart', cartRoutes);
 app.use('/api/v1/wishlist', wishlistRoutes);
 app.use('/api/v1/payments', paymentRoutes);
 app.use('/api/v1/addresses', addressRoutes);
+app.use('/api/v1/payouts', payoutsRoutes);
+app.use('/api/v1/questions', questionsRouter);
+app.use('/api/v1/seller-hub', sellerHubRouter);
+app.use('/api/v1/admin', adminRoutes);
+app.use('/api/v1', contentRouter);
+app.use('/api/v1', accountRouter);
+app.use('/api/v1/returns', returnsRouter);
+app.use('/api/v1/refunds', refundsRouter);
+app.use('/api/v1/disputes', disputesRouter);
+app.use('/api/v1/uploads', uploadsRouter);
 
 // ============================================
 // Error Handling

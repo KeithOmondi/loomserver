@@ -4,6 +4,7 @@ import { env } from './config/env';
 import { connectDB, closeDB } from './config/db';
 import { deleteExpiredRefreshTokens } from './services/token.service';
 import { redisService } from './config/redis';
+import { startWorker } from './services/worker';
 
 const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // once a day
 
@@ -40,6 +41,8 @@ const start = async (): Promise<void> => {
     console.log(`💚 Health: http://localhost:${env.PORT}/health`);
   });
 
+  const stopWorker = env.ENABLE_WORKER === 'true' && !env.IS_TEST ? startWorker() : () => {};
+
   // Runs once a day, only after the server is up — no reason to fire
   // this before connectDB has already confirmed the pool is healthy.
   const cleanupInterval = setInterval(async () => {
@@ -56,6 +59,7 @@ const start = async (): Promise<void> => {
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`\n${signal} received. Shutting down gracefully...`);
     clearInterval(cleanupInterval);
+    stopWorker();
 
     // Close Redis connection first
     try {

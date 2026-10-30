@@ -8,14 +8,14 @@ import { AppError } from '../utils/response';
 import { StoreProfile } from '../features/store/store.types';
 
 // ✅ Added 'moderator' role
-export type UserRole = 'customer' | 'seller' | 'moderator' | 'admin' | 'super_admin';
+export type UserRole = 'customer' | 'seller' | 'moderator' | 'admin' | 'super_admin' | 'support' | 'finance';
 
 // Updated: No store_id in token payload
 const decodedTokenSchema = z.object({
     id: z.string().min(1),
     email: z.string().email(),
     full_name: z.string().min(1),
-    role: z.enum(['customer', 'seller', 'moderator', 'admin', 'super_admin']),
+    role: z.enum(['customer', 'seller', 'moderator', 'admin', 'super_admin', 'support', 'finance']),
     token_version: z.number().int().nonnegative(),
 });
 
@@ -26,6 +26,8 @@ const ROLE_RANK: Record<UserRole, number> = {
     customer: 0,
     seller: 1,
     moderator: 2,
+    support: 2,
+    finance: 2,
     admin: 3,
     super_admin: 4,
 };
@@ -342,6 +344,16 @@ export const requireAdmin = (req: Request, res: Response, next: NextFunction): v
     }
 
     next();
+};
+
+/**
+ * requireStaff — explicit allow-list (no rank fallback). admin and super_admin always pass,
+ * e.g. requireStaff('finance') lets finance, admin and super_admin through, but not support.
+ */
+export const requireStaff = (...roles: UserRole[]) => (req: Request, res: Response, next: NextFunction): void => {
+    if (!req.user) return next(new AppError(401, 'Authentication required.'));
+    if (req.user.role === 'admin' || req.user.role === 'super_admin' || roles.includes(req.user.role)) return next();
+    return next(new AppError(403, 'You do not have permission to perform this action.'));
 };
 
 export const requireSuperAdmin = (req: Request, res: Response, next: NextFunction): void => {

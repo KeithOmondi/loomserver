@@ -6,6 +6,9 @@
   "scripts": {
     "build": "tsc",
     "start": "node --max-old-space-size=4096 --expose-gc dist/server.js",
+    "migrate": "tsx src/config/migrate.ts",
+    "seed": "tsx src/config/seed.ts",
+    "test": "vitest run",
     "dev": "tsx watch --max-old-space-size=4096 src/server.ts",
     "dev:debug": "nodemon --watch src --ext ts --exec \"node --max-old-space-size=4096 --expose-gc --inspect -r @swc-node/register src/server.ts\""
   },
@@ -47,6 +50,7 @@
     "nodemon": "^3.1.14",
     "ts-node": "^10.9.2",
     "tsx": "^4.23.13",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vitest": "^3.2.7"
   }
 }

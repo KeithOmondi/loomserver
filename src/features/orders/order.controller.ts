@@ -5,7 +5,6 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import { AppError } from '../../utils/response';
 import {
   createOrder,
-  createOrdersFromCart,
   getOrderById,
   getOrderByNumber,
   getOrders,
@@ -13,6 +12,7 @@ import {
   cancelOrder,
   getOrderMetrics,
 } from './order.service';
+import { createOrdersFromCart } from './checkout.service';
 import { checkSellerStatus, getSellerByUserId } from '../seller/seller.service';
 import {
   CreateOrderInput,

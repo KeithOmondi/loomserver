@@ -233,6 +233,24 @@ export const ROLE_INFO: Record<UserRole, RoleInfo> = {
         badgeClass: 'bg-purple-100 text-purple-700',
         redirectPath: '/moderator/dashboard',
     },
+    support: {
+        role: 'support',
+        displayName: 'Support Agent',
+        description: 'Handles customer issues, orders and disputes',
+        permissions: ['browse', 'view_orders', 'handle_disputes', 'message_customers'],
+        color: 'text-teal-600',
+        badgeClass: 'bg-teal-100 text-teal-700',
+        redirectPath: '/admin/dashboard',
+    },
+    finance: {
+        role: 'finance',
+        displayName: 'Finance',
+        description: 'Manages payouts, refunds and the ledger',
+        permissions: ['browse', 'view_orders', 'manage_payouts', 'approve_refunds', 'view_ledger'],
+        color: 'text-emerald-600',
+        badgeClass: 'bg-emerald-100 text-emerald-700',
+        redirectPath: '/admin/dashboard',
+    },
     admin: {
         role: 'admin',
         displayName: 'Administrator',
@@ -281,6 +299,8 @@ export const isRoleOrHigher = (user: User | null, requiredRole: UserRole): boole
         customer: 0,
         seller: 1,
         moderator: 2,
+        support: 2,
+        finance: 2,
         admin: 3,
         super_admin: 4,
     };

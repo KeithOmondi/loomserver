@@ -304,7 +304,7 @@ export const forgotPassword = async (input: ForgotPasswordInput): Promise<{ mess
             createdAt: new Date(),
         });
 
-        const resetLink = `${env.CLIENT_URL}/reset-password?token=${resetToken}`;
+        const resetLink = `${env.webUrl}/reset-password?token=${resetToken}`;
         const { html, text } = getPasswordResetTemplate({
             resetLink,
             expiresInHours: Math.floor(RESET_TOKEN_EXPIRY_MINUTES / 60),

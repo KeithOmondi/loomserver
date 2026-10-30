@@ -347,6 +347,12 @@ export const handleCallback = async (
     tx.status === 'failed' ||
     tx.status === 'cancelled'
   ) {
+    // The status query may have confirmed the payment before the callback arrived. When the
+    // callback does arrive, keep its receipt number for reconciliation.
+    if (resultCode === 0) {
+      const late = stk.CallbackMetadata?.Item?.find((i) => i.Name === 'MpesaReceiptNumber');
+      if (late?.Value) await attachReceipt(tx.id, tx.payment_group_id, String(late.Value), payload);
+    }
     console.log(
       `[mpesa] Duplicate callback for ${checkoutRequestId} (already ${tx.status}) — ignoring`,
     );
@@ -391,6 +397,120 @@ export const handleCallback = async (
   }
 };
 
+const attachReceipt = async (txId: string, groupId: string | null, receipt: string, payload: unknown): Promise<void> => {
+  const upd = await pool.query(
+    `UPDATE mpesa_transactions SET mpesa_receipt = $1, callback_payload = $2::jsonb, updated_at = NOW()
+     WHERE id = $3 AND mpesa_receipt IS NULL RETURNING id`,
+    [receipt, JSON.stringify(payload), txId],
+  );
+  if (upd.rows.length && groupId) {
+    await pool.query(
+      `UPDATE orders SET payment = jsonb_set(COALESCE(payment, '{}'::jsonb), '{mpesa_receipt}', to_jsonb($1::text)) WHERE payment_group_id = $2`,
+      [receipt, groupId],
+    );
+  }
+};
+
+// ============================================
+// STK QUERY — confirm a payment without waiting for the callback
+// ============================================
+// Safaricom's callback can be missed (tunnel down, firewall, outage). Asking Safaricom directly
+// makes payment confirmation reliable: the status screen and a background sweep both use this.
+
+export interface StkQueryResult {
+  state: 'success' | 'cancelled' | 'timeout' | 'failed' | 'pending';
+  code: string | null;
+  desc: string;
+}
+
+const STILL_PROCESSING = /being processed|still processing|processing/i;
+const lastQueryAt = new Map<string, number>();
+const QUERY_GAP_MS = 5_000;
+
+export const queryStkStatus = async (checkoutRequestId: string): Promise<StkQueryResult> => {
+  const timestamp = darajaTimestamp();
+  const password = Buffer.from(`${SHORTCODE}${PASSKEY}${timestamp}`).toString('base64');
+  const token = await getAccessToken();
+
+  try {
+    const { data } = await axios.post(
+      `${BASE_URL}/mpesa/stkpushquery/v1/query`,
+      { BusinessShortCode: SHORTCODE, Password: password, Timestamp: timestamp, CheckoutRequestID: checkoutRequestId },
+      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 15_000 },
+    );
+    const code = data?.ResultCode !== undefined && data?.ResultCode !== null ? String(data.ResultCode) : null;
+    const desc = String(data?.ResultDesc ?? '');
+    if (code === null) return { state: 'pending', code, desc };
+    if (code === '0') return { state: 'success', code, desc };
+    if (code === '1032') return { state: 'cancelled', code, desc: desc || 'Request cancelled by user' };
+    if (code === '1037') return { state: 'timeout', code, desc: desc || 'No response from the phone' };
+    return { state: 'failed', code, desc: desc || 'Payment failed' };
+  } catch (err) {
+    const body = (err as any)?.response?.data;
+    const msg = String(body?.errorMessage ?? body?.ResultDesc ?? (err as Error).message ?? '');
+    // "The transaction is being processed" (or any lookup hiccup) means: not decided yet.
+    // A failed lookup must never fail a payment, so everything uncertain stays pending.
+    return { state: 'pending', code: null, desc: STILL_PROCESSING.test(msg) ? 'Still processing' : msg };
+  }
+};
+
+/** Settles a pending payment group by asking Safaricom. Safe to call repeatedly and alongside the callback. */
+export const reconcilePaymentGroup = async (paymentGroupId: string): Promise<'success' | 'failed' | 'pending'> => {
+  const row = (
+    await pool.query<{ id: string; checkout_request_id: string }>(
+      `SELECT mt.id, mt.checkout_request_id
+       FROM mpesa_transactions mt JOIN orders o ON o.id = mt.order_id
+       WHERE o.payment_group_id = $1 AND mt.status = 'pending' AND mt.checkout_request_id IS NOT NULL
+       ORDER BY mt.created_at DESC LIMIT 1`,
+      [paymentGroupId],
+    )
+  ).rows[0];
+  if (!row) return 'pending';
+
+  const last = lastQueryAt.get(row.id) ?? 0;
+  if (Date.now() - last < QUERY_GAP_MS) return 'pending';
+  lastQueryAt.set(row.id, Date.now());
+
+  const result = await queryStkStatus(row.checkout_request_id);
+  if (result.state === 'pending') return 'pending';
+
+  // Only one of {callback, this query} may settle the transaction.
+  const won = await pool.query(
+    `UPDATE mpesa_transactions
+     SET status = $1, result_code = $2, result_desc = $3, completed_at = NOW(), updated_at = NOW()
+     WHERE id = $4 AND status = 'pending' RETURNING id`,
+    [result.state, result.code, result.desc, row.id],
+  );
+  if (!won.rows.length) return result.state === 'success' ? 'success' : 'failed';
+
+  if (result.state === 'success') {
+    await markPaymentGroupPaid(paymentGroupId, null, row.id);
+    return 'success';
+  }
+  await markPaymentGroupFailed(paymentGroupId, result.desc);
+  return 'failed';
+};
+
+/** Worker sweep: settle payments whose customer closed the page or whose callback never arrived. */
+export const reconcileStalePayments = async (): Promise<number> => {
+  const groups = await pool.query<{ payment_group_id: string }>(
+    `SELECT DISTINCT o.payment_group_id
+     FROM mpesa_transactions mt JOIN orders o ON o.id = mt.order_id
+     WHERE mt.status = 'pending' AND mt.checkout_request_id IS NOT NULL AND o.payment_group_id IS NOT NULL
+       AND mt.initiated_at < NOW() - INTERVAL '45 seconds' AND mt.initiated_at > NOW() - INTERVAL '3 hours'
+     LIMIT 30`,
+  );
+  let settled = 0;
+  for (const g of groups.rows) {
+    try {
+      if ((await reconcilePaymentGroup(g.payment_group_id)) !== 'pending') settled += 1;
+    } catch (err) {
+      console.error('[mpesa] reconcile failed for', g.payment_group_id, (err as Error).message);
+    }
+  }
+  return settled;
+};
+
 // ============================================
 // STATUS QUERY — for the mobile polling screen
 // ============================================
@@ -406,6 +526,13 @@ export interface PaymentGroupStatus {
 export const getPaymentGroupStatus = async (
   paymentGroupId: string,
 ): Promise<PaymentGroupStatus> => {
+  // Don't depend on the callback alone: if it hasn't arrived, ask Safaricom (throttled).
+  try {
+    await reconcilePaymentGroup(paymentGroupId);
+  } catch (err) {
+    console.error('[mpesa] status reconcile failed:', (err as Error).message);
+  }
+
   const txResult = await pool.query<{
     status: string;
     mpesa_receipt: string | null;

@@ -82,7 +82,7 @@ export const adminRegisterSchema = z.object({
         password: passwordField,
         full_name: fullNameField,
         phone: phoneField,
-        role: z.enum(['moderator', 'admin', 'super_admin']),
+        role: z.enum(['moderator', 'support', 'finance', 'admin', 'super_admin']),
         send_welcome_email: z.boolean().optional().default(true), // ✅ NEW
     }),
 });

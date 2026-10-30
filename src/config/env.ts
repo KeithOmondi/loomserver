@@ -4,6 +4,8 @@ import path from 'path';
 import { z } from 'zod';
 
 // Load environment variables from .env file (server/.env, two levels up from src/config)
+// .env.local (git-ignored, optional) wins over .env — used to point local dev at a local database.
+dotenv.config({ path: path.resolve(__dirname, '../../.env.local') });
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 const envSchema = z.object({
@@ -138,6 +140,18 @@ const envSchema = z.object({
     // M-Pesa callback IP check both depend on it. Use 0 when running with no proxy.
     TRUST_PROXY: z.coerce.number().int().nonnegative().default(1),
 
+    // Public URL of the website, used for links in emails (password reset, order updates).
+    // Defaults to the first CLIENT_URL entry.
+    WEB_URL: z.string().url().optional(),
+
+    // SMS (Africa's Talking) — optional; without them SMS is logged instead of sent
+    AT_USERNAME: z.string().optional(),
+    AT_API_KEY: z.string().optional(),
+    AT_SENDER_ID: z.string().optional(),
+
+    // Run the background worker (emails, escrow release, dispute escalation, payout drafts) in this process
+    ENABLE_WORKER: z.enum(['true', 'false']).default('true'),
+
     // Health check
     HEALTH_CHECK_PATH: z.string().default('/health'),
     HEALTH_CHECK_INTERVAL: z.coerce.number().int().positive().default(10000), // 10 seconds
@@ -180,6 +194,9 @@ export const env = {
     IS_PRODUCTION: parsed.data.NODE_ENV === 'production',
     IS_DEVELOPMENT: parsed.data.NODE_ENV === 'development',
     IS_TEST: parsed.data.NODE_ENV === 'test',
+
+    /** Public website URL for links in emails. */
+    webUrl: (parsed.data.WEB_URL ?? (Array.isArray(parsed.data.CLIENT_URL) ? parsed.data.CLIENT_URL[0] : parsed.data.CLIENT_URL)).replace(/\/$/, ''),
 
     // Helper to check if an origin is allowed
     isOriginAllowed: (origin: string): boolean => {

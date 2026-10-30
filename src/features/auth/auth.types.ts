@@ -271,6 +271,8 @@ export const ROLE_PERMISSIONS: Record<UserRole, string[]> = {
     customer: ['browse', 'purchase', 'review'],
     seller: ['browse', 'purchase', 'review', 'manage_store', 'manage_products', 'manage_orders'],
     moderator: ['browse', 'review_stores', 'review_products', 'moderate_content', 'view_all'],
+    support: ['browse', 'view_orders', 'handle_disputes', 'message_customers'],
+    finance: ['browse', 'view_orders', 'manage_payouts', 'approve_refunds', 'view_ledger'],
     admin: ['browse', 'review_stores', 'review_products', 'moderate_content', 'view_all', 'manage_users', 'manage_settings'],
     super_admin: ['browse', 'review_stores', 'review_products', 'moderate_content', 'view_all', 'manage_users', 'manage_settings', 'manage_roles'],
 };
@@ -279,6 +281,8 @@ export const ROLE_REDIRECTS: Record<UserRole, string> = {
     customer: '/',
     seller: '/dashboard',
     moderator: '/moderator/dashboard',
+    support: '/admin/dashboard',
+    finance: '/admin/dashboard',
     admin: '/admin/dashboard',
     super_admin: '/super-admin/dashboard',
 };

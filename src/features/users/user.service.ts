@@ -173,7 +173,7 @@ export const checkFirstLogin = async (userId: string): Promise<FirstLoginCheckRe
         throw new AppError(404, 'User not found.');
     }
 
-    const isAdminCreated = ['moderator', 'admin', 'super_admin'].includes(user.role);
+    const isAdminCreated = ['moderator', 'support', 'finance', 'admin', 'super_admin'].includes(user.role);
     const needsPasswordReset = isAdminCreated && user.is_active;
 
     return {

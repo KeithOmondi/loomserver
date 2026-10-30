@@ -18,6 +18,7 @@ import {
 } from './order.types';
 import { getProductById } from '../products/product.service';
 import { CheckoutBody } from './order.validator';
+import { cancelOrderWithRefund } from './order-lifecycle.service';
 
 // ============================================
 // CONSTANTS
@@ -31,7 +32,7 @@ const DEFAULT_CURRENCY = 'KES';
 // HELPERS
 // ============================================
 
-const generateOrderNumber = async (client: PoolClient): Promise<string> => {
+export const generateOrderNumber = async (client: PoolClient): Promise<string> => {
   const year = new Date().getFullYear();
   const result = await client.query<{ n: string }>(
     `SELECT nextval('order_number_seq')::text AS n`,
@@ -40,7 +41,7 @@ const generateOrderNumber = async (client: PoolClient): Promise<string> => {
   return `${ORDER_PREFIX}-${year}-${seq}`;
 };
 
-const mapRowToOrder = (row: any): Order => ({
+export const mapRowToOrder = (row: any): Order => ({
   id: row.id,
   order_number: row.order_number,
   store_id: row.store_id,
@@ -73,6 +74,17 @@ const mapRowToOrder = (row: any): Order => ({
   created_at: row.created_at,
   updated_at: row.updated_at,
   deleted_at: row.deleted_at,
+  // fulfilment / escrow fields added with the escrow system
+  ...({
+    tracking_number: row.tracking_number ?? null,
+    carrier: row.carrier ?? null,
+    delivery_confirmed_at: row.delivery_confirmed_at ?? null,
+    auto_confirm_at: row.auto_confirm_at ?? null,
+    escrow_status: row.escrow_status ?? 'none',
+    coupon_code: row.coupon_code ?? null,
+    expires_at: row.expires_at ?? null,
+    payment_group_id: row.payment_group_id ?? null,
+  } as object),
 });
 
 // ============================================
@@ -101,7 +113,7 @@ interface CartRow {
   buyer_phone: string | null;
 }
 
-const resolveShippingAddress = async (
+export const resolveShippingAddress = async (
   client: PoolClient,
   userId: string,
   checkout: CheckoutBody,
@@ -158,277 +170,7 @@ const resolveShippingAddress = async (
   throw new AppError(400, 'Shipping address is required.');
 };
 
-export const createOrdersFromCart = async (
-  userId: string,
-  checkout: CheckoutBody,
-): Promise<{
-  orders: Order[];
-  total: number;
-  currency: string;
-  payment_group_id: string;
-}> => {
-
-  const client = await pool.connect();
-
-  try {
-    await client.query('BEGIN');
-
-    // ---- 1. Load the buyer ----
-    const buyerResult = await client.query<{
-      id: string;
-      full_name: string;
-      email: string;
-      phone: string | null;
-    }>(
-      `SELECT id, full_name, email, phone FROM users WHERE id = $1`,
-      [userId],
-    );
-    if (buyerResult.rows.length === 0) {
-      throw new AppError(404, 'User not found.');
-    }
-    const buyer = buyerResult.rows[0];
-
-    // ---- 2. Load the cart ----
-    const cartResult = await client.query<CartRow>(
-      `SELECT
-         c.id                              AS cart_id,
-         ci.id                             AS cart_item_id,
-         ci.product_id                     AS product_id,
-         ci.quantity                       AS quantity,
-         ci.unit_price                     AS unit_price,
-         p.name                            AS product_name,
-         p.slug                            AS product_slug,
-         p.sku                             AS product_sku,
-         p.status                          AS product_status,
-         p.is_active                       AS product_is_active,
-         p.stock_quantity                  AS product_stock_quantity,
-         st.id                             AS store_id,
-         st.name                           AS store_name,
-         st.seller_id                      AS seller_id,
-         img.url                           AS product_image,
-         u.id                              AS buyer_id,
-         u.full_name                       AS buyer_full_name,
-         u.email                           AS buyer_email,
-         u.phone                           AS buyer_phone
-       FROM carts c
-       JOIN cart_items  ci ON ci.cart_id = c.id
-       JOIN products    p  ON p.id = ci.product_id
-       JOIN stores      st ON st.id = p.store_id
-       JOIN users       u  ON u.id = c.user_id
-       LEFT JOIN LATERAL (
-         SELECT url FROM product_images
-         WHERE product_id = p.id
-         ORDER BY is_primary DESC, sort_order ASC, created_at ASC
-         LIMIT 1
-       ) img ON TRUE
-       WHERE c.user_id = $1
-         AND p.deleted_at IS NULL`,
-      [userId],
-    );
-
-    if (cartResult.rows.length === 0) {
-      throw new AppError(400, 'Your cart is empty.');
-    }
-
-    // ---- 3. Validate every item ----
-    for (const row of cartResult.rows) {
-      if (!row.product_is_active || row.product_status !== 'active') {
-        throw new AppError(
-          400,
-          `"${row.product_name}" is no longer available. Please remove it from your cart.`,
-        );
-      }
-      if (row.product_stock_quantity < row.quantity) {
-        throw new AppError(
-          400,
-          `Insufficient stock for "${row.product_name}". Available: ${row.product_stock_quantity}.`,
-        );
-      }
-    }
-
-    // ---- 4. Resolve shipping snapshot ----
-    const shippingAddress = await resolveShippingAddress(
-      client,
-      userId,
-      checkout,
-      {
-        full_name: buyer.full_name,
-        email: buyer.email,
-        phone: buyer.phone,
-      },
-    );
-
-    // ---- 5. Group items by store_id ----
-    const groupsByStore = new Map<string, CartRow[]>();
-    for (const row of cartResult.rows) {
-      const existing = groupsByStore.get(row.store_id) ?? [];
-      existing.push(row);
-      groupsByStore.set(row.store_id, existing);
-    }
-
-    // ---- 6. payment_group_id ----
-    const paymentGroupResult = await client.query<{ id: string }>(
-      `SELECT gen_random_uuid()::text AS id`,
-    );
-    const paymentGroupId = paymentGroupResult.rows[0].id;
-
-    // ---- 7. Buyer snapshot ----
-    const [firstName, ...restName] = (buyer.full_name || '').split(' ');
-    const customerSnapshot = {
-      first_name: firstName ?? '',
-      last_name: restName.join(' ') || '',
-      email: buyer.email,
-      phone: buyer.phone ?? '',
-    };
-
-    // ---- 8. Insert orders ----
-    const createdOrders: Order[] = [];
-    let grandTotal = 0;
-
-    for (const [storeId, items] of groupsByStore) {
-
-      let subtotal = 0;
-      const orderItemsJson: OrderItem[] = [];
-
-      for (const row of items) {
-        const unitPrice = Number(row.unit_price);
-        const lineTotal = unitPrice * row.quantity;
-        subtotal += lineTotal;
-
-        orderItemsJson.push({
-          id: row.cart_item_id,
-          order_id: '',
-          product_id: row.product_id,
-          variant_id: undefined,
-          product_name: row.product_name,
-          variant_name: undefined,
-          sku: row.product_sku ?? '',
-          quantity: row.quantity,
-          price: unitPrice,
-          total: lineTotal,
-          discount_amount: 0,
-          tax_amount: 0,
-          tax_rate: 0,
-          metadata: { image: row.product_image },
-          created_at: new Date(),
-          updated_at: new Date(),
-        });
-      }
-
-      const taxTotal = 0;
-      const shippingTotal = 0;
-      const discountTotal = 0;
-      const orderTotal = subtotal + taxTotal + shippingTotal - discountTotal;
-      grandTotal += orderTotal;
-
-      const orderNumber = await generateOrderNumber(client);
-
-      const shippingSnapshot: OrderShipping = {
-        method: 'standard',
-        cost: shippingTotal,
-        estimated_days: 5,
-        address: shippingAddress,
-      };
-
-      const paymentSnapshot: OrderPayment = {
-        method: 'mpesa',
-        status: 'pending',
-        amount: orderTotal,
-        currency: DEFAULT_CURRENCY,
-      };
-
-      const sellerId = items[0].seller_id;
-
-      const orderResult = await client.query(
-        `INSERT INTO orders (
-           order_number, store_id, user_id, seller_id,
-           customer, items, subtotal, discount_total,
-           tax_total, shipping_total, total, currency,
-           shipping, payment, status, fulfillment_status,
-           payment_status, customer_notes, placed_at,
-           created_at, updated_at, payment_group_id
-         ) VALUES (
-           $1, $2, $3, $4,
-           $5::jsonb, $6::jsonb, $7, $8,
-           $9, $10, $11, $12,
-           $13::jsonb, $14::jsonb, $15, $16,
-           $17, $18, NOW(), NOW(), NOW(), $19
-         )
-         RETURNING *`,
-        [
-          orderNumber,
-          storeId,
-          userId,
-          sellerId,
-          JSON.stringify(customerSnapshot),
-          JSON.stringify(orderItemsJson),
-          subtotal,
-          discountTotal,
-          taxTotal,
-          shippingTotal,
-          orderTotal,
-          DEFAULT_CURRENCY,
-          JSON.stringify(shippingSnapshot),
-          JSON.stringify(paymentSnapshot),
-          'pending',
-          'unfulfilled',
-          'pending',
-          checkout.customer_notes ?? null,
-          paymentGroupId,
-        ],
-      );
-
-      const order = mapRowToOrder(orderResult.rows[0]);
-      createdOrders.push(order);
-
-      for (const item of orderItemsJson) {
-        await client.query(
-          `INSERT INTO order_items (
-             order_id, product_id, variant_id, quantity, price, total
-           ) VALUES ($1, $2, $3, $4, $5, $6)`,
-          [
-            order.id,
-            item.product_id,
-            item.variant_id ?? null,
-            item.quantity,
-            item.price,
-            item.total,
-          ],
-        );
-      }
-
-      for (const item of orderItemsJson) {
-        await client.query(
-          `UPDATE products
-           SET stock_quantity = stock_quantity - $1,
-               updated_at = NOW()
-           WHERE id = $2`,
-          [item.quantity, item.product_id],
-        );
-      }
-    }
-
-    // ---- 9. Clear the cart ----
-    await client.query(`DELETE FROM cart_items WHERE cart_id = $1`, [
-      cartResult.rows[0].cart_id,
-    ]);
-
-    await client.query('COMMIT');
-
-    return {
-      orders: createdOrders,
-      total: grandTotal,
-      currency: DEFAULT_CURRENCY,
-      payment_group_id: paymentGroupId,
-    };
-  } catch (error) {
-    console.error('[createOrdersFromCart] ❌ error — rolling back:', error);
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-};
+// createOrdersFromCart now lives in ./checkout.service (live prices, shipping, coupons, commission).
 
 // ============================================
 // CREATE ORDER (admin / manual)
@@ -845,15 +587,21 @@ export const updateOrder = async (
       throw new AppError(404, 'Order not found.');
     }
 
-    if (role !== 'admin' && role !== 'super_admin' && order.user_id !== userId) {
+    // Buyers and sellers use the dedicated actions (cancel / ship / deliver / confirm) so escrow,
+    // stock and notifications stay consistent with the status. This generic update is staff-only.
+    if (role !== 'admin' && role !== 'super_admin') {
       throw new AppError(403, 'You do not have permission to update this order.');
     }
+    void userId;
 
     const updates: string[] = [];
     const values: any[] = [];
     let paramCount = 1;
 
     if (input.status) {
+      if (['paid', 'shipped', 'delivered', 'completed', 'cancelled', 'refunded'].includes(input.status)) {
+        throw new AppError(400, `Use the dedicated action to set "${input.status}" so payments and stock stay correct.`);
+      }
       if (!isStatusTransitionValid(order.status, input.status)) {
         throw new AppError(
           400,
@@ -947,90 +695,17 @@ export const cancelOrder = async (
   reason?: string,
   role?: string,
 ): Promise<Order> => {
-  const order = await getOrderById(orderId);
-  if (!order) throw new AppError(404, 'Order not found.');
-
-  if (role !== 'admin' && role !== 'super_admin' && order.user_id !== userId) {
-    throw new AppError(403, 'You do not have permission to cancel this order.');
-  }
-  if (order.status === 'cancelled') {
-    throw new AppError(409, 'Order is already cancelled.');
-  }
-  if (order.status === 'delivered' || order.status === 'completed') {
-    throw new AppError(409, 'Order cannot be cancelled after delivery.');
-  }
-
-  return updateOrder(
-    orderId,
-    userId,
-    { status: 'cancelled', admin_notes: reason || 'Order cancelled' },
-    role || 'user',
-  );
+  await cancelOrderWithRefund(orderId, { id: userId, role: role ?? 'customer' }, reason);
+  const updated = await getOrderById(orderId);
+  if (!updated) throw new AppError(404, 'Order not found.');
+  return updated;
 };
 
 // ============================================
 // PAYMENT GROUP HELPERS
 // ============================================
 
-export const markPaymentGroupPaid = async (
-  paymentGroupId: string,
-  mpesaReceipt: string,
-  transactionId: string,
-): Promise<void> => {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    const orders = await client.query<{ id: string; payment: OrderPayment }>(
-      `SELECT id, payment FROM orders
-       WHERE payment_group_id = $1 AND deleted_at IS NULL`,
-      [paymentGroupId],
-    );
-
-    for (const row of orders.rows) {
-      const nextPayment: OrderPayment = {
-        ...(row.payment || {}),
-        method: 'mpesa',
-        status: 'paid',
-        transaction_id: transactionId,
-        mpesa_receipt: mpesaReceipt,
-        paid_at: new Date(),
-      } as OrderPayment;
-
-      await client.query(
-        `UPDATE orders
-         SET payment = $1::jsonb,
-             payment_status = 'paid',
-             status = CASE WHEN status = 'pending' THEN 'paid' ELSE status END,
-             payment_confirmed_at = NOW(),
-             updated_at = NOW()
-         WHERE id = $2`,
-        [JSON.stringify(nextPayment), row.id],
-      );
-    }
-
-    await client.query('COMMIT');
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-};
-
-export const markPaymentGroupFailed = async (
-  paymentGroupId: string,
-  reason: string,
-): Promise<void> => {
-  await pool.query(
-    `UPDATE orders
-     SET payment_status = 'failed',
-         status = CASE WHEN status = 'pending' THEN 'failed' ELSE status END,
-         updated_at = NOW()
-     WHERE payment_group_id = $1 AND deleted_at IS NULL`,
-    [paymentGroupId],
-  );
-};
+export { markPaymentGroupPaid, markPaymentGroupFailed } from './order-lifecycle.service';
 
 // ============================================
 // ORDER METRICS

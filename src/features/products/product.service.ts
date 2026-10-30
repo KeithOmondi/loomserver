@@ -1025,15 +1025,22 @@ export const createProductReview = async (
       throw new AppError(409, 'You have already reviewed this product.');
     }
 
-    let isVerifiedPurchase = false;
-    if (input.order_id) {
-      const orderResult = await client.query(
-        `SELECT id FROM orders
-         WHERE id = $1 AND user_id = $2 AND status = 'completed'`,
-        [input.order_id, userId]
-      );
-      isVerifiedPurchase = orderResult.rows.length > 0;
+    // Only customers who actually received this product may review it. We find the qualifying
+    // order ourselves (delivered/completed, paid, containing this product) instead of trusting
+    // an order_id from the client.
+    const qualifying = await client.query(
+      `SELECT o.id FROM orders o
+       JOIN order_items oi ON oi.order_id = o.id
+       WHERE o.user_id = $1 AND oi.product_id = $2
+         AND o.status IN ('delivered', 'completed') AND o.payment_status IN ('paid', 'partially_refunded')
+       ORDER BY o.delivered_at DESC NULLS LAST LIMIT 1`,
+      [userId, input.product_id]
+    );
+    if (qualifying.rows.length === 0) {
+      throw new AppError(403, 'Only customers who have received this product can review it.');
     }
+    input.order_id = qualifying.rows[0].id;
+    const isVerifiedPurchase = true;
 
     const result = await client.query(
       `INSERT INTO product_reviews (

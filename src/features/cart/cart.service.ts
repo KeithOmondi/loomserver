@@ -133,12 +133,26 @@ const hydrateCart = async (
     img_sort_order: number | null;
     img_metadata: Record<string, unknown> | null;
     img_created_at: Date | null;
+    variant_id: string | null;
+    v_name: string | null;
+    v_price: string | null;
+    v_stock: number | null;
+    v_image: string | null;
+    p_backorders: boolean;
+    flash_price: string | null;
   }>(
     `SELECT
        ci.id,
        ci.product_id,
        ci.quantity,
        ci.unit_price,
+       ci.variant_id,
+       pv.name               AS v_name,
+       pv.price              AS v_price,
+       pv.stock_quantity     AS v_stock,
+       pv.image_url          AS v_image,
+       p.allow_backorders    AS p_backorders,
+       fl.sale_price         AS flash_price,
 
        p.id                  AS p_id,
        p.name                AS p_name,
@@ -161,6 +175,13 @@ const hydrateCart = async (
        img.created_at        AS img_created_at
      FROM cart_items ci
      JOIN products p ON p.id = ci.product_id
+     LEFT JOIN product_variants pv ON pv.id = ci.variant_id
+     LEFT JOIN LATERAL (
+       SELECT fi.sale_price
+       FROM flash_sale_items fi JOIN flash_sales fs ON fs.id = fi.flash_sale_id
+       WHERE fi.product_id = p.id AND fs.is_active AND fs.starts_at <= NOW() AND fs.ends_at >= NOW()
+       ORDER BY fi.sale_price ASC LIMIT 1
+     ) fl ON TRUE
      LEFT JOIN LATERAL (
        SELECT *
        FROM product_images
@@ -175,15 +196,18 @@ const hydrateCart = async (
 
   const items: CartLine[] = itemsResult.rows.map((row) => {
     const quantity = row.quantity;
-    const unitPrice = Number(row.unit_price);
-    const lineTotal = quantity * unitPrice;
+    // Show what checkout will actually charge: live variant price, or the product price
+    // (lowered by an active flash sale) — not the snapshot taken when the item was added.
+    const unitPrice = row.variant_id
+      ? Number(row.v_price)
+      : Math.min(Number(row.p_price), row.flash_price != null ? Number(row.flash_price) : Number(row.p_price));
+    const lineTotal = Math.round(quantity * unitPrice * 100) / 100;
+    const stockQty = row.variant_id ? row.v_stock ?? 0 : row.p_stock_quantity;
     const isAvailable =
       row.p_is_active === true && row.p_status === 'active';
     const inStock =
       isAvailable &&
-      (row.p_stock_quantity > 0 ||
-        row.p_stock_status === 'backorder' ||
-        row.p_stock_status === 'preorder');
+      (row.p_backorders || stockQty >= quantity);
 
     return {
       id: row.id,
@@ -195,10 +219,12 @@ const hydrateCart = async (
         compare_at_price:
           row.p_compare_at_price !== null ? Number(row.p_compare_at_price) : null,
         status: row.p_status as any,
-        stock_quantity: row.p_stock_quantity,
+        stock_quantity: stockQty,
         stock_status: row.p_stock_status,
         is_active: row.p_is_active,
-        image: row.img_id
+        image: row.v_image
+          ? { id: row.variant_id as string, product_id: row.p_id, url: row.v_image, public_id: '', alt_text: null, is_primary: true, sort_order: 0, metadata: null, created_at: new Date() }
+          : row.img_id
           ? {
               id: row.img_id,
               product_id: row.img_product_id as string,
@@ -212,6 +238,8 @@ const hydrateCart = async (
             }
           : null,
       },
+      variant_id: row.variant_id,
+      variant_name: row.v_name,
       quantity,
       unit_price: unitPrice,
       line_total: lineTotal,
@@ -266,8 +294,9 @@ export const addItem = async (
       is_active: boolean;
       stock_quantity: number;
       allow_backorders: boolean;
+      has_variants: boolean;
     }>(
-      `SELECT id, price, status, is_active, stock_quantity, allow_backorders
+      `SELECT id, price, status, is_active, stock_quantity, allow_backorders, has_variants
        FROM products
        WHERE id = $1 AND deleted_at IS NULL`,
       [input.product_id],
@@ -284,6 +313,21 @@ export const addItem = async (
     const variantId = input.variant_id ?? null;
     const quantity = input.quantity ?? 1;
 
+    // Variant products must be added with a valid, active variant; price and stock come from it.
+    let unitPrice = Number(product.price);
+    let stockQuantity = product.stock_quantity;
+    if (variantId) {
+      const v = await client.query<{ price: string; stock_quantity: number }>(
+        `SELECT price, stock_quantity FROM product_variants WHERE id = $1 AND product_id = $2 AND is_active = true`,
+        [variantId, input.product_id],
+      );
+      if (!v.rows[0]) throw new AppError(400, 'That option is not available for this product.');
+      unitPrice = Number(v.rows[0].price);
+      stockQuantity = v.rows[0].stock_quantity;
+    } else if (product.has_variants) {
+      throw new AppError(400, 'Please choose an option (size, colour…) before adding this product.');
+    }
+
     // Look up the existing line ourselves: with a NULL variant_id the unique index never
     // reports a conflict (NULLs are distinct), so ON CONFLICT would create duplicate lines.
     const existing = await client.query<{ id: string; quantity: number }>(
@@ -295,11 +339,11 @@ export const addItem = async (
 
     // Don't let a cart hold more than is in stock (resulting line quantity, not just this add).
     if (!product.allow_backorders) {
-      if (product.stock_quantity <= 0) {
+      if (stockQuantity <= 0) {
         throw new AppError(409, 'This product is out of stock.');
       }
-      if ((line?.quantity ?? 0) + quantity > product.stock_quantity) {
-        throw new AppError(409, `Only ${product.stock_quantity} in stock.`);
+      if ((line?.quantity ?? 0) + quantity > stockQuantity) {
+        throw new AppError(409, `Only ${stockQuantity} in stock.`);
       }
     }
 
@@ -312,7 +356,7 @@ export const addItem = async (
       await client.query(
         `INSERT INTO cart_items (cart_id, product_id, variant_id, quantity, unit_price, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, NOW(), NOW())`,
-        [cart.id, input.product_id, variantId, quantity, product.price],
+        [cart.id, input.product_id, variantId, quantity, unitPrice],
       );
     }
 
@@ -346,9 +390,10 @@ export const updateItemQuantity = async (
 
     // Verify the item belongs to this cart
     const itemCheck = await client.query<{ stock_quantity: number; allow_backorders: boolean }>(
-      `SELECT p.stock_quantity, p.allow_backorders
+      `SELECT COALESCE(pv.stock_quantity, p.stock_quantity) AS stock_quantity, p.allow_backorders
        FROM cart_items ci
        JOIN products p ON p.id = ci.product_id
+       LEFT JOIN product_variants pv ON pv.id = ci.variant_id
        WHERE ci.id = $1 AND ci.cart_id = $2`,
       [itemId, cart.id],
     );

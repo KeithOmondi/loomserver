@@ -61,6 +61,9 @@ export interface CartLine {
 
   product: CartItemProduct;
 
+  variant_id?: UUID | null;
+  variant_name?: string | null;
+
   quantity: number;
   unit_price: number;
   /** quantity × unit_price, computed server-side. */
